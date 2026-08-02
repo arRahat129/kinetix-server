@@ -10,6 +10,7 @@ const port = process.env.PORT || 5000;
 
 app.use(cors({
     origin: [
+        "http://localhost:3000",
         "http://localhost:5000",
     ],
     credentials: true
@@ -33,15 +34,24 @@ async function run() {
     try {
         await client.connect();
 
+        const db = client.db('kinetix_db');
+        const campaignsCollection = db.collection('campaigns');
+
+        app.post('/api/campaigns', async (req, res) => {
+            const campaignData = req.body;
+            const result = await campaignsCollection.insertOne(campaignData);
+            res.send(result);
+        });
 
 
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
-    } finally {
-        await client.close();
+    } catch (error) {
+        console.error("MongoDB Connection Error:", error);
     }
 }
 run().catch(console.dir);
+
 
 
 app.listen(port, () => {
