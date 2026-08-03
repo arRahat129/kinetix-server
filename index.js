@@ -37,7 +37,7 @@ async function run() {
         const db = client.db('kinetix_db');
         const campaignsCollection = db.collection('campaigns');
         const contributionsCollection = db.collection('contributions');
-        const usersCollection = db.collection('users');
+        const usersCollection = db.collection('user');
 
         // 1. Get all approved campaigns (Pagination, Multiple Filters, Search, Sort)
         app.get('/api/campaigns/approved', async (req, res) => {
@@ -173,7 +173,7 @@ async function run() {
                 const updateData = req.body;
 
                 const filter = { _id: new ObjectId(id) };
-                
+
                 // Remove _id from updateData if present
                 delete updateData._id;
 
@@ -233,6 +233,134 @@ async function run() {
                     refundedSupportersCount: Object.keys(refundsMap).length,
                     deleteResult
                 });
+            } catch (error) {
+                res.status(500).send({ message: error.message });
+            }
+        });
+
+        // 6. ADMIN ROUTES
+
+        // 6a. Get all users
+        app.get('/api/admin/users', async (req, res) => {
+            try {
+                const { search = '', role = '' } = req.query;
+                const query = {};
+
+                if (search) {
+                    query.$or = [
+                        { name: { $regex: search, $options: 'i' } },
+                        { email: { $regex: search, $options: 'i' } }
+                    ];
+                }
+                if (role) {
+                    query.role = role;
+                }
+
+                const users = await usersCollection.find(query).sort({ createdAt: -1 }).toArray();
+                res.send({ success: true, data: users });
+            } catch (error) {
+                res.status(500).send({ message: error.message });
+            }
+        });
+
+        // 6b. Delete user
+        app.delete('/api/admin/users/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const filter = { _id: new ObjectId(id) };
+                const result = await usersCollection.deleteOne(filter);
+                res.send({ success: true, result });
+            } catch (error) {
+                res.status(500).send({ message: error.message });
+            }
+        });
+
+        // 6c. Update user role (Admin, Creator, Supporter)
+        app.patch('/api/admin/users/:id/role', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { role } = req.body;
+
+                if (!['Admin', 'Creator', 'Supporter'].includes(role)) {
+                    return res.status(400).send({ message: 'Invalid role specified' });
+                }
+
+                const filter = { _id: new ObjectId(id) };
+                const updateDoc = {
+                    $set: {
+                        role,
+                        updatedAt: new Date().toISOString()
+                    }
+                };
+
+                const result = await usersCollection.updateOne(filter, updateDoc);
+                res.send({ success: true, result });
+            } catch (error) {
+                res.status(500).send({ message: error.message });
+            }
+        });
+
+        // 6d. Get all campaigns for admin (Supports search, status filter e.g. pending)
+        app.get('/api/admin/campaigns', async (req, res) => {
+            try {
+                const { search = '', status = '', page = 1, limit = 50 } = req.query;
+                const query = {};
+
+                if (status) {
+                    query.status = status;
+                }
+
+                if (search) {
+                    query.$or = [
+                        { campaign_title: { $regex: search, $options: 'i' } },
+                        { creatorEmail: { $regex: search, $options: 'i' } },
+                        { creatorName: { $regex: search, $options: 'i' } }
+                    ];
+                }
+
+                const pageNum = parseInt(page) || 1;
+                const limitNum = parseInt(limit) || 50;
+                const skip = (pageNum - 1) * limitNum;
+
+                const total = await campaignsCollection.countDocuments(query);
+                const result = await campaignsCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .skip(skip)
+                    .limit(limitNum)
+                    .toArray();
+
+                res.send({
+                    total,
+                    page: pageNum,
+                    totalPages: Math.ceil(total / limitNum),
+                    data: result
+                });
+            } catch (error) {
+                res.status(500).send({ message: error.message });
+            }
+        });
+
+        // 6e. Update campaign status (approved / rejected)
+        app.patch('/api/admin/campaigns/:id/status', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { status } = req.body;
+
+                if (!['approved', 'rejected', 'pending'].includes(status)) {
+                    return res.status(400).send({ message: 'Invalid status' });
+                }
+
+                const filter = { _id: new ObjectId(id) };
+                const updateDoc = {
+                    $set: {
+                        status,
+                        updatedAt: new Date().toISOString()
+                    }
+                };
+
+                const result = await campaignsCollection.updateOne(filter, updateDoc);
+                res.send({ success: true, result });
             } catch (error) {
                 res.status(500).send({ message: error.message });
             }
