@@ -159,7 +159,21 @@ async function run() {
             }
         });
 
-        // 3. Create Campaign
+        // 3. Get single campaign by ID
+        app.get('/api/campaigns/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const campaign = await campaignsCollection.findOne({ _id: new ObjectId(id) });
+                if (!campaign) {
+                    return res.status(404).send({ message: 'Campaign not found' });
+                }
+                res.send(campaign);
+            } catch (error) {
+                res.status(500).send({ message: error.message });
+            }
+        });
+
+        // 4. Create Campaign
         app.post('/api/campaigns', async (req, res) => {
             const campaignData = req.body;
             const result = await campaignsCollection.insertOne(campaignData);
