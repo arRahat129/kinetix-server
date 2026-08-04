@@ -39,14 +39,12 @@ async function run() {
         const contributionsCollection = db.collection('contributions');
         const usersCollection = db.collection('user');
 
-        // 1. Get all approved campaigns (Pagination, Multiple Filters, Search, Sort)
+        // 1. Get all approved campaigns (Pagination, Search, Category Filter, Sort)
         app.get('/api/campaigns/approved', async (req, res) => {
             try {
                 const {
                     search = '',
                     category = '',
-                    minGoal = '',
-                    maxGoal = '',
                     sortBy = 'createdAt',
                     sortOrder = 'desc',
                     page = 1,
@@ -63,15 +61,9 @@ async function run() {
                     ];
                 }
 
-                // Multiple filter options: category, goal range
+                // Category filter (case insensitive match, works for full name as well as initial letter legacy data)
                 if (category) {
-                    query.category = category;
-                }
-
-                if (minGoal || maxGoal) {
-                    query.funding_goal = {};
-                    if (minGoal) query.funding_goal.$gte = parseFloat(minGoal);
-                    if (maxGoal) query.funding_goal.$lte = parseFloat(maxGoal);
+                    query.category = { $regex: `^${category}`, $options: 'i' };
                 }
 
                 const pageNum = parseInt(page) || 1;
