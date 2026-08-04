@@ -38,6 +38,7 @@ async function run() {
         const campaignsCollection = db.collection('campaigns');
         const contributionsCollection = db.collection('contributions');
         const usersCollection = db.collection('user');
+        const paymentsCollection = db.collection('payments');
 
         // 1. Get all approved campaigns (Pagination, Search, Category Filter, Sort)
         app.get('/api/campaigns/approved', async (req, res) => {
@@ -281,7 +282,7 @@ async function run() {
             }
         });
 
-        // 6c. Update user role (Admin, Creator, Supporter)
+        // 6c. Update user role (Admin, Creator, Supporter) & recalculate default role credits
         app.patch('/api/admin/users/:id/role', async (req, res) => {
             try {
                 const { id } = req.params;
@@ -292,15 +293,104 @@ async function run() {
                 }
 
                 const filter = { _id: new ObjectId(id) };
+                const existingUser = await usersCollection.findOne(filter);
+                if (!existingUser) {
+                    return res.status(404).send({ message: 'User not found' });
+                }
+
+                const oldRole = existingUser.role || 'Supporter';
+                const roleDefaultCredits = { Supporter: 50, Creator: 20, Admin: 0 };
+                const oldDefault = roleDefaultCredits[oldRole] ?? 0;
+                const newDefault = roleDefaultCredits[role] ?? 0;
+                const diff = newDefault - oldDefault;
+
+                const currentCredits = Number(existingUser.credits ?? oldDefault);
+                const updatedCredits = Math.max(0, currentCredits + diff);
+
                 const updateDoc = {
                     $set: {
                         role,
+                        credits: updatedCredits,
                         updatedAt: new Date().toISOString()
                     }
                 };
 
                 const result = await usersCollection.updateOne(filter, updateDoc);
-                res.send({ success: true, result });
+                res.send({ success: true, oldRole, newRole: role, updatedCredits, result });
+            } catch (error) {
+                res.status(500).send({ message: error.message });
+            }
+        });
+
+        // 7. Payment Verification & Credit Addition
+        app.post('/api/payments/verify', async (req, res) => {
+            try {
+                const { stripeSessionId, userEmail, creditsToAdd, amount, userId, userName, userImage } = req.body;
+
+                if (!stripeSessionId || !userEmail) {
+                    return res.status(400).send({ success: false, message: 'Missing required parameters' });
+                }
+
+                // Check if session already recorded
+                const existingPayment = await paymentsCollection.findOne({ stripeSessionId });
+                if (existingPayment) {
+                    return res.send({
+                        success: true,
+                        message: 'Payment already processed previously.',
+                        data: existingPayment
+                    });
+                }
+
+                const credits = Number(creditsToAdd) || 0;
+                const amountVal = Number(amount) || 0;
+
+                // Update user credits in DB
+                const userFilter = { email: userEmail };
+                await usersCollection.updateOne(
+                    userFilter,
+                    { $inc: { credits: credits }, $set: { updatedAt: new Date().toISOString() } }
+                );
+
+                // Store transaction history in payments collection
+                const paymentRecord = {
+                    stripeSessionId,
+                    userId: userId || null,
+                    userEmail,
+                    userName: userName || 'Supporter',
+                    userImage: userImage || '',
+                    creditsAdded: credits,
+                    amount: amountVal,
+                    packageName: `${credits} Platform Credits`,
+                    paymentMethod: 'Stripe',
+                    status: 'completed',
+                    createdAt: new Date().toISOString()
+                };
+
+                await paymentsCollection.insertOne(paymentRecord);
+
+                res.send({
+                    success: true,
+                    creditsAdded: credits,
+                    userEmail,
+                    paymentRecord
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 8. User Payment History
+        app.get('/api/payments/my-history', async (req, res) => {
+            try {
+                const { userEmail } = req.query;
+                if (!userEmail) {
+                    return res.status(400).send({ message: 'userEmail parameter is required' });
+                }
+                const history = await paymentsCollection
+                    .find({ userEmail })
+                    .sort({ createdAt: -1 })
+                    .toArray();
+                res.send({ success: true, data: history });
             } catch (error) {
                 res.status(500).send({ message: error.message });
             }
