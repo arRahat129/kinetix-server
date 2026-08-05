@@ -594,7 +594,7 @@ async function run() {
             }
         });
 
-        // 9c. Approve contribution
+        // 9c. Approve contribution (Creator accepts contribution: credits added to creator balance, increment campaign stats)
         app.patch('/api/contributions/:id/approve', async (req, res) => {
             try {
                 const { id } = req.params;
@@ -610,13 +610,24 @@ async function run() {
 
                 const amountVal = Number(contribution.Contribution_amount || contribution.amount || 0);
                 const campId = contribution.campaign_id || contribution.campaignId;
+                const creatorEmail = contribution.creator_email || contribution.creatorEmail;
 
                 await contributionsCollection.updateOne(filter, {
                     $set: { status: 'approved', updatedAt: new Date().toISOString() }
                 });
 
+                // Add credits directly to the creator's balance
+                if (creatorEmail) {
+                    await usersCollection.updateOne(
+                        { email: { $regex: `^${creatorEmail}$`, $options: 'i' } },
+                        { $inc: { credits: amountVal }, $set: { updatedAt: new Date().toISOString() } }
+                    );
+                }
+
+                // Increment campaign stats
                 if (campId) {
-                    const campFilter = ObjectId.isValid(campId) ? { _id: new ObjectId(campId) } : { _id: campId };
+                    const isObjId = ObjectId.isValid(campId);
+                    const campFilter = isObjId ? { $or: [{ _id: new ObjectId(campId) }, { _id: String(campId) }] } : { _id: campId };
                     await campaignsCollection.updateOne(
                         campFilter,
                         {
@@ -626,13 +637,13 @@ async function run() {
                     );
                 }
 
-                res.send({ success: true, message: 'Contribution approved successfully' });
+                res.send({ success: true, message: 'Contribution approved and creator credited successfully' });
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
             }
         });
 
-        // 9d. Reject contribution (refunds credits)
+        // 9d. Reject contribution (refunds credits to supporter)
         app.patch('/api/contributions/:id/reject', async (req, res) => {
             try {
                 const { id } = req.params;
@@ -661,6 +672,122 @@ async function run() {
                 }
 
                 res.send({ success: true, message: 'Contribution rejected and credits refunded' });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 9e. Update contribution (Supporter updates details or amount of pending/approved/rejected)
+        app.patch('/api/contributions/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { Contribution_amount, amount, message } = req.body;
+                const filter = { _id: new ObjectId(id) };
+
+                const contribution = await contributionsCollection.findOne(filter);
+                if (!contribution) {
+                    return res.status(404).send({ success: false, message: 'Contribution not found' });
+                }
+
+                const newAmount = Number(Contribution_amount || amount || 0);
+                const oldAmount = Number(contribution.Contribution_amount || contribution.amount || 0);
+                const diff = newAmount - oldAmount;
+                const suppEmail = contribution.Supporter_email || contribution.userEmail;
+
+                if (contribution.status === 'pending') {
+                    if (diff !== 0) {
+                        const supporter = await usersCollection.findOne({ email: suppEmail });
+                        if (!supporter || (supporter.credits || 0) < diff) {
+                            return res.status(400).send({ success: false, message: 'Insufficient credits balance to update contribution.' });
+                        }
+
+                        // Deduct/refund difference from supporter
+                        await usersCollection.updateOne(
+                            { email: suppEmail },
+                            { $inc: { credits: -diff }, $set: { updatedAt: new Date().toISOString() } }
+                        );
+                    }
+
+                    await contributionsCollection.updateOne(filter, {
+                        $set: {
+                            Contribution_amount: newAmount,
+                            amount: newAmount,
+                            message: message !== undefined ? message : contribution.message,
+                            updatedAt: new Date().toISOString()
+                        }
+                    });
+                } else {
+                    // Approved or Rejected contributions can only update their note/message (amount cannot be changed directly)
+                    await contributionsCollection.updateOne(filter, {
+                        $set: {
+                            message: message !== undefined ? message : contribution.message,
+                            updatedAt: new Date().toISOString()
+                        }
+                    });
+                }
+
+                res.send({ success: true, message: 'Contribution updated successfully.' });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 9f. Delete/Withdraw contribution (Supporter cancels contribution)
+        app.delete('/api/contributions/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const filter = { _id: new ObjectId(id) };
+                const contribution = await contributionsCollection.findOne(filter);
+                if (!contribution) {
+                    return res.status(404).send({ success: false, message: 'Contribution not found' });
+                }
+
+                const amountVal = Number(contribution.Contribution_amount || contribution.amount || 0);
+                const suppEmail = contribution.Supporter_email || contribution.userEmail;
+                const campId = contribution.campaign_id || contribution.campaignId;
+
+                // 1. If status is pending: refund supporter credits, remove contribution completely
+                if (contribution.status === 'pending') {
+                    if (suppEmail && amountVal > 0) {
+                        await usersCollection.updateOne(
+                            { email: { $regex: `^${suppEmail}$`, $options: 'i' } },
+                            { $inc: { credits: amountVal }, $set: { updatedAt: new Date().toISOString() } }
+                        );
+                    }
+                }
+                // 2. If status is approved: refund supporter credits, deduct from creator credits (reversing approval), decrement campaign stats
+                else if (contribution.status === 'approved') {
+                    if (suppEmail && amountVal > 0) {
+                        await usersCollection.updateOne(
+                            { email: { $regex: `^${suppEmail}$`, $options: 'i' } },
+                            { $inc: { credits: amountVal }, $set: { updatedAt: new Date().toISOString() } }
+                        );
+                    }
+
+                    const creatorEmail = contribution.creator_email || contribution.creatorEmail;
+                    if (creatorEmail && amountVal > 0) {
+                        await usersCollection.updateOne(
+                            { email: { $regex: `^${creatorEmail}$`, $options: 'i' } },
+                            { $inc: { credits: -amountVal }, $set: { updatedAt: new Date().toISOString() } }
+                        );
+                    }
+
+                    if (campId) {
+                        const isObjId = ObjectId.isValid(campId);
+                        const campFilter = isObjId ? { $or: [{ _id: new ObjectId(campId) }, { _id: String(campId) }] } : { _id: campId };
+                        await campaignsCollection.updateOne(
+                            campFilter,
+                            {
+                                $inc: { raised_amount: -amountVal, amount_raised: -amountVal, supporters_count: -1 },
+                                $set: { updatedAt: new Date().toISOString() }
+                            }
+                        );
+                    }
+                }
+                // 3. If status is rejected: credits were already refunded when rejected, so we just delete it from DB
+
+                await contributionsCollection.deleteOne(filter);
+                res.send({ success: true, message: 'Contribution withdrawn successfully.' });
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
             }
@@ -726,46 +853,161 @@ async function run() {
                 const activeCampaigns = campaigns.filter(c => !c.deadline || new Date(c.deadline) >= now).length;
                 const totalAmountRaised = campaigns.reduce((sum, c) => sum + Number(c.raised_amount || c.amount_raised || 0), 0);
 
+                // Fetch creator's actual credit balance from user document
+                let creatorCredits = 0;
+                if (creatorEmail) {
+                    const creatorUser = await usersCollection.findOne({ email: creatorEmail });
+                    if (creatorUser) {
+                        creatorCredits = Number(creatorUser.credits || 0);
+                    }
+                }
+
                 res.send({
                     success: true,
                     totalCampaigns,
                     activeCampaigns,
-                    totalAmountRaised
+                    totalAmountRaised,
+                    creatorCredits
                 });
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
             }
         });
 
-        // 11a. Create withdrawal
+        // 11a. Create withdrawal request (Creator requests withdrawal; credits immediately deducted)
         app.post('/api/withdrawals', async (req, res) => {
             try {
-                const { creator_email, creator_name, withdrawal_credit, withdrawal_amount, payment_system, account_number } = req.body;
+                const { creator_email, creator_name, withdrawal_credit, payment_system, account_number } = req.body;
                 const credits = Number(withdrawal_credit) || 0;
                 if (!creator_email || credits < 200 || !account_number) {
                     return res.status(400).send({ success: false, message: 'Invalid withdrawal request. Minimum 200 credits required.' });
                 }
 
+                const creator = await usersCollection.findOne({ email: { $regex: `^${creator_email}$`, $options: 'i' } });
+                if (!creator) {
+                    return res.status(404).send({ success: false, message: 'Creator user not found.' });
+                }
+
+                const availableCredits = Number(creator.credits || 0);
+                if (availableCredits < credits) {
+                    return res.status(400).send({ success: false, message: `Insufficient credits. You have ${availableCredits} credits.` });
+                }
+
+                // Deduct credits from creator immediately
+                await usersCollection.updateOne(
+                    { email: { $regex: `^${creator_email}$`, $options: 'i' } },
+                    { $inc: { credits: -credits }, $set: { updatedAt: new Date().toISOString() } }
+                );
+
                 const withdrawalDoc = {
                     creator_email,
-                    creator_name: creator_name || 'Creator',
+                    creator_name: creator_name || creator.name || 'Creator',
                     withdrawal_credit: credits,
-                    withdrawal_amount: Number(withdrawal_amount) || (credits / 20),
+                    withdrawal_amount: credits / 20, // 20 credits = $1 USD
                     payment_system: payment_system || 'Bank Transfer',
                     account_number,
                     status: 'pending',
                     withdraw_date: new Date().toISOString(),
-                    createdAt: new Date().toISOString()
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
                 };
 
                 const result = await withdrawalsCollection.insertOne(withdrawalDoc);
-                res.send({ success: true, insertedId: result.insertedId, withdrawal: withdrawalDoc });
+                res.send({ success: true, insertedId: result.insertedId, data: withdrawalDoc });
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
             }
         });
 
-        // 11b. Get creator withdrawals
+        // 11b. Update pending withdrawal request (adjusts creator credits accordingly)
+        app.patch('/api/withdrawals/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { withdrawal_credit, payment_system, account_number } = req.body;
+                const newCredits = Number(withdrawal_credit) || 0;
+
+                if (newCredits < 200 || !account_number) {
+                    return res.status(400).send({ success: false, message: 'Minimum 200 credits and account number are required.' });
+                }
+
+                const filter = { _id: new ObjectId(id) };
+                const existingReq = await withdrawalsCollection.findOne(filter);
+                if (!existingReq) {
+                    return res.status(404).send({ success: false, message: 'Withdrawal request not found.' });
+                }
+
+                if (existingReq.status !== 'pending') {
+                    return res.status(400).send({ success: false, message: 'Only pending requests can be modified.' });
+                }
+
+                const creatorEmail = existingReq.creator_email;
+                const creator = await usersCollection.findOne({ email: { $regex: `^${creatorEmail}$`, $options: 'i' } });
+                if (!creator) {
+                    return res.status(404).send({ success: false, message: 'Creator user not found.' });
+                }
+
+                const oldCredits = Number(existingReq.withdrawal_credit) || 0;
+                const diff = newCredits - oldCredits;
+
+                if (diff > 0) {
+                    const availableCredits = Number(creator.credits || 0);
+                    if (availableCredits < diff) {
+                        return res.status(400).send({ success: false, message: `Insufficient credits to increase request. You need ${diff} more credits but only have ${availableCredits} available.` });
+                    }
+                }
+
+                // Adjust creator credits (positive diff = deduct more, negative diff = refund)
+                await usersCollection.updateOne(
+                    { email: { $regex: `^${creatorEmail}$`, $options: 'i' } },
+                    { $inc: { credits: -diff }, $set: { updatedAt: new Date().toISOString() } }
+                );
+
+                const updateDoc = {
+                    $set: {
+                        withdrawal_credit: newCredits,
+                        withdrawal_amount: newCredits / 20,
+                        payment_system,
+                        account_number,
+                        updatedAt: new Date().toISOString()
+                    }
+                };
+
+                await withdrawalsCollection.updateOne(filter, updateDoc);
+                res.send({ success: true, message: 'Withdrawal request updated successfully.' });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 11c. Delete / cancel withdrawal request (refunds creator credits)
+        app.delete('/api/withdrawals/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const filter = { _id: new ObjectId(id) };
+                const existingReq = await withdrawalsCollection.findOne(filter);
+                if (!existingReq) {
+                    return res.status(404).send({ success: false, message: 'Withdrawal request not found.' });
+                }
+
+                if (existingReq.status === 'pending') {
+                    const creatorEmail = existingReq.creator_email;
+                    const refundCredits = Number(existingReq.withdrawal_credit) || 0;
+
+                    // Refund credits to creator
+                    await usersCollection.updateOne(
+                        { email: { $regex: `^${creatorEmail}$`, $options: 'i' } },
+                        { $inc: { credits: refundCredits }, $set: { updatedAt: new Date().toISOString() } }
+                    );
+                }
+
+                await withdrawalsCollection.deleteOne(filter);
+                res.send({ success: true, message: 'Withdrawal request deleted and credits refunded.' });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 11d. Get creator withdrawals
         app.get('/api/withdrawals/creator', async (req, res) => {
             try {
                 const { creatorEmail } = req.query;
@@ -774,6 +1016,181 @@ async function run() {
                 }
                 const withdrawals = await withdrawalsCollection.find({ creator_email: creatorEmail }).sort({ createdAt: -1 }).toArray();
                 res.send({ success: true, data: withdrawals });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 11e. Get all withdrawals (for Admin)
+        app.get('/api/admin/withdrawals', async (req, res) => {
+            try {
+                const { status = '', search = '', page = 1, limit = 10 } = req.query;
+                const query = {};
+                if (status) {
+                    query.status = status;
+                }
+                if (search) {
+                    query.$or = [
+                        { creator_email: { $regex: search, $options: 'i' } },
+                        { creator_name: { $regex: search, $options: 'i' } },
+                        { payment_system: { $regex: search, $options: 'i' } },
+                        { account_number: { $regex: search, $options: 'i' } }
+                    ];
+                }
+
+                const pageNum = parseInt(page) || 1;
+                const limitNum = parseInt(limit) || 10;
+                const skip = (pageNum - 1) * limitNum;
+
+                const total = await withdrawalsCollection.countDocuments(query);
+                const data = await withdrawalsCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .skip(skip)
+                    .limit(limitNum)
+                    .toArray();
+
+                res.send({
+                    success: true,
+                    total,
+                    page: pageNum,
+                    totalPages: Math.ceil(total / limitNum) || 1,
+                    data
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 11f. Admin update withdrawal status (Approve / Reject)
+        app.patch('/api/admin/withdrawals/:id/status', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { status, adminNote = '' } = req.body;
+
+                if (!['approved', 'rejected'].includes(status)) {
+                    return res.status(400).send({ success: false, message: 'Invalid status' });
+                }
+
+                const filter = { _id: new ObjectId(id) };
+                const withdrawalReq = await withdrawalsCollection.findOne(filter);
+                if (!withdrawalReq) {
+                    return res.status(404).send({ success: false, message: 'Withdrawal request not found' });
+                }
+
+                if (withdrawalReq.status !== 'pending') {
+                    return res.status(400).send({ success: false, message: 'This request has already been processed.' });
+                }
+
+                if (status === 'rejected') {
+                    const creatorEmail = withdrawalReq.creator_email;
+                    const refundCredits = Number(withdrawalReq.withdrawal_credit) || 0;
+
+                    // Refund credits back to creator
+                    await usersCollection.updateOne(
+                        { email: { $regex: `^${creatorEmail}$`, $options: 'i' } },
+                        { $inc: { credits: refundCredits }, $set: { updatedAt: new Date().toISOString() } }
+                    );
+                }
+
+                await withdrawalsCollection.updateOne(filter, {
+                    $set: {
+                        status,
+                        adminNote,
+                        updatedAt: new Date().toISOString()
+                    }
+                });
+
+                res.send({ success: true, message: `Withdrawal request successfully ${status}.` });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 12. Admin Stats
+        app.get('/api/admin/stats', async (req, res) => {
+            try {
+                const totalUsers = await usersCollection.countDocuments();
+                const supportersCount = await usersCollection.countDocuments({ role: 'Supporter' });
+                const creatorsCount = await usersCollection.countDocuments({ role: 'Creator' });
+                const adminsCount = await usersCollection.countDocuments({ role: 'Admin' });
+
+                const totalCampaigns = await campaignsCollection.countDocuments();
+                const pendingCampaigns = await campaignsCollection.countDocuments({ status: 'pending' });
+                const approvedCampaigns = await campaignsCollection.countDocuments({ status: 'approved' });
+                const rejectedCampaigns = await campaignsCollection.countDocuments({ status: 'rejected' });
+
+                const contributions = await contributionsCollection.find({ status: 'approved' }).toArray();
+                const totalContributionsCount = await contributionsCollection.countDocuments();
+                const totalContributedCredits = contributions.reduce((sum, c) => sum + Number(c.Contribution_amount || c.amount || 0), 0);
+
+                const totalWithdrawalsCount = await withdrawalsCollection.countDocuments();
+                const pendingWithdrawalsCount = await withdrawalsCollection.countDocuments({ status: 'pending' });
+                const approvedWithdrawals = await withdrawalsCollection.find({ status: 'approved' }).toArray();
+                const approvedWithdrawalsCount = approvedWithdrawals.length;
+                const totalWithdrawnAmountUSD = approvedWithdrawals.reduce((sum, w) => sum + Number(w.withdrawal_amount || 0), 0);
+
+                const systemRevenue = totalContributedCredits * 0.05; // supporters pay $0.10/credit, creators get $0.05/credit
+
+                // Monthly contributions grouping
+                const allApprovedContributions = await contributionsCollection
+                    .find({ status: 'approved' })
+                    .sort({ createdAt: 1 })
+                    .toArray();
+
+                const monthlyFunding = {};
+                allApprovedContributions.forEach(c => {
+                    const date = c.createdAt ? new Date(c.createdAt) : new Date();
+                    const monthKey = date.toLocaleString('default', { month: 'short', year: '2-digit' });
+                    monthlyFunding[monthKey] = (monthlyFunding[monthKey] || 0) + Number(c.Contribution_amount || c.amount || 0);
+                });
+
+                const monthlyData = Object.keys(monthlyFunding).map(month => ({
+                    month,
+                    amount: monthlyFunding[month]
+                })).slice(-6);
+
+                // Category distribution
+                const categoryCounts = {};
+                const campaigns = await campaignsCollection.find({ status: 'approved' }).toArray();
+                campaigns.forEach(c => {
+                    const cat = c.category || 'Other';
+                    categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+                });
+                const categoryData = Object.keys(categoryCounts).map(name => ({
+                    name,
+                    value: categoryCounts[name]
+                }));
+
+                const recentWithdrawals = await withdrawalsCollection
+                    .find({ status: 'pending' })
+                    .sort({ createdAt: -1 })
+                    .limit(5)
+                    .toArray();
+
+                res.send({
+                    success: true,
+                    totalUsers,
+                    stats: {
+                        supportersCount,
+                        creatorsCount,
+                        adminsCount,
+                        totalCampaigns,
+                        pendingCampaigns,
+                        approvedCampaigns,
+                        rejectedCampaigns,
+                        totalContributionsCount,
+                        totalContributedCredits,
+                        totalWithdrawalsCount,
+                        pendingWithdrawalsCount,
+                        approvedWithdrawalsCount,
+                        totalWithdrawnAmountUSD,
+                        systemRevenue
+                    },
+                    monthlyData,
+                    categoryData,
+                    recentWithdrawals
+                });
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
             }
