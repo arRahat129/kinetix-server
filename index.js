@@ -39,6 +39,7 @@ async function run() {
         const contributionsCollection = db.collection('contributions');
         const usersCollection = db.collection('user');
         const paymentsCollection = db.collection('payments');
+        const withdrawalsCollection = db.collection('withdrawals');
 
         // 1. Get all approved campaigns (Pagination, Search, Category Filter, Sort)
         app.get('/api/campaigns/approved', async (req, res) => {
@@ -459,6 +460,322 @@ async function run() {
                 res.send({ success: true, result });
             } catch (error) {
                 res.status(500).send({ message: error.message });
+            }
+        });
+
+        // 9a. Create contribution (deducts credits immediately)
+        app.post('/api/contributions', async (req, res) => {
+            try {
+                const {
+                    campaign_id, campaignId, campaign_title, creator_email, creatorEmail,
+                    creator_name, Supporter_name, Supporter_email, userEmail, supporterImage,
+                    Contribution_amount, amount, message
+                } = req.body;
+
+                const suppEmail = Supporter_email || userEmail;
+                const amountVal = Number(Contribution_amount || amount || 0);
+                const campId = campaign_id || campaignId;
+
+                if (!suppEmail || !campId || amountVal <= 0) {
+                    return res.status(400).send({ success: false, message: 'Invalid contribution data' });
+                }
+
+                // Check supporter balance
+                const supporter = await usersCollection.findOne({ email: suppEmail });
+                if (!supporter || (supporter.credits || 0) < amountVal) {
+                    return res.status(400).send({ success: false, message: 'Insufficient credits balance' });
+                }
+
+                // Deduct credits from supporter immediately
+                await usersCollection.updateOne(
+                    { email: suppEmail },
+                    { $inc: { credits: -amountVal }, $set: { updatedAt: new Date().toISOString() } }
+                );
+
+                const contributionDoc = {
+                    campaign_id: campId,
+                    campaignId: campId,
+                    campaign_title: campaign_title || '',
+                    Contribution_amount: amountVal,
+                    amount: amountVal,
+                    Supporter_email: suppEmail,
+                    userEmail: suppEmail,
+                    Supporter_name: Supporter_name || supporter.name || 'Supporter',
+                    supporterImage: supporterImage || supporter.image || '',
+                    creator_name: creator_name || '',
+                    creator_email: creator_email || creatorEmail || '',
+                    message: message || '',
+                    status: 'pending',
+                    current_date: new Date().toISOString(),
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                };
+
+                const result = await contributionsCollection.insertOne(contributionDoc);
+                res.send({ success: true, insertedId: result.insertedId, contribution: contributionDoc });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 9b. Get contributions (supports supporterEmail, creatorEmail, campaignId, status, search, pagination)
+        app.get('/api/contributions', async (req, res) => {
+            try {
+                const { supporterEmail, creatorEmail, campaignId, status, search, page = 1, limit = 10 } = req.query;
+                const conditions = [];
+
+                if (supporterEmail) {
+                    conditions.push({
+                        $or: [
+                            { Supporter_email: supporterEmail },
+                            { userEmail: supporterEmail },
+                            { Supporter_email: { $regex: `^${supporterEmail}$`, $options: 'i' } },
+                            { userEmail: { $regex: `^${supporterEmail}$`, $options: 'i' } }
+                        ]
+                    });
+                }
+
+                if (creatorEmail) {
+                    conditions.push({
+                        $or: [
+                            { creator_email: creatorEmail },
+                            { creatorEmail: creatorEmail },
+                            { creator_email: { $regex: `^${creatorEmail}$`, $options: 'i' } },
+                            { creatorEmail: { $regex: `^${creatorEmail}$`, $options: 'i' } }
+                        ]
+                    });
+                }
+
+                if (campaignId) {
+                    conditions.push({
+                        $or: [
+                            { campaign_id: campaignId },
+                            { campaignId: campaignId }
+                        ]
+                    });
+                }
+
+                if (status) {
+                    conditions.push({ status });
+                }
+
+                if (search) {
+                    conditions.push({
+                        $or: [
+                            { campaign_title: { $regex: search, $options: 'i' } },
+                            { Supporter_name: { $regex: search, $options: 'i' } }
+                        ]
+                    });
+                }
+
+                const query = conditions.length > 0 ? (conditions.length === 1 ? conditions[0] : { $and: conditions }) : {};
+
+                const pageNum = parseInt(page) || 1;
+                const limitNum = parseInt(limit) || 10;
+                const skip = (pageNum - 1) * limitNum;
+
+                const total = await contributionsCollection.countDocuments(query);
+                const result = await contributionsCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .skip(skip)
+                    .limit(limitNum)
+                    .toArray();
+
+                res.send({
+                    success: true,
+                    total,
+                    page: pageNum,
+                    totalPages: Math.ceil(total / limitNum) || 1,
+                    data: result
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 9c. Approve contribution
+        app.patch('/api/contributions/:id/approve', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const filter = { _id: new ObjectId(id) };
+                const contribution = await contributionsCollection.findOne(filter);
+                if (!contribution) {
+                    return res.status(404).send({ success: false, message: 'Contribution not found' });
+                }
+
+                if (contribution.status === 'approved') {
+                    return res.send({ success: true, message: 'Already approved' });
+                }
+
+                const amountVal = Number(contribution.Contribution_amount || contribution.amount || 0);
+                const campId = contribution.campaign_id || contribution.campaignId;
+
+                await contributionsCollection.updateOne(filter, {
+                    $set: { status: 'approved', updatedAt: new Date().toISOString() }
+                });
+
+                if (campId) {
+                    const campFilter = ObjectId.isValid(campId) ? { _id: new ObjectId(campId) } : { _id: campId };
+                    await campaignsCollection.updateOne(
+                        campFilter,
+                        {
+                            $inc: { raised_amount: amountVal, amount_raised: amountVal, supporters_count: 1 },
+                            $set: { updatedAt: new Date().toISOString() }
+                        }
+                    );
+                }
+
+                res.send({ success: true, message: 'Contribution approved successfully' });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 9d. Reject contribution (refunds credits)
+        app.patch('/api/contributions/:id/reject', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const filter = { _id: new ObjectId(id) };
+                const contribution = await contributionsCollection.findOne(filter);
+                if (!contribution) {
+                    return res.status(404).send({ success: false, message: 'Contribution not found' });
+                }
+
+                if (contribution.status === 'rejected') {
+                    return res.send({ success: true, message: 'Already rejected' });
+                }
+
+                const amountVal = Number(contribution.Contribution_amount || contribution.amount || 0);
+                const suppEmail = contribution.Supporter_email || contribution.userEmail;
+
+                await contributionsCollection.updateOne(filter, {
+                    $set: { status: 'rejected', updatedAt: new Date().toISOString() }
+                });
+
+                if (suppEmail && amountVal > 0) {
+                    await usersCollection.updateOne(
+                        { email: suppEmail },
+                        { $inc: { credits: amountVal }, $set: { updatedAt: new Date().toISOString() } }
+                    );
+                }
+
+                res.send({ success: true, message: 'Contribution rejected and credits refunded' });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 10a. Supporter stats
+        app.get('/api/supporter/stats', async (req, res) => {
+            try {
+                const { supporterEmail } = req.query;
+                if (!supporterEmail) {
+                    return res.status(400).send({ success: false, message: 'supporterEmail is required' });
+                }
+
+                const query = {
+                    $or: [
+                        { Supporter_email: supporterEmail },
+                        { userEmail: supporterEmail },
+                        { Supporter_email: { $regex: `^${supporterEmail}$`, $options: 'i' } },
+                        { userEmail: { $regex: `^${supporterEmail}$`, $options: 'i' } }
+                    ]
+                };
+                const allContribs = await contributionsCollection.find(query).toArray();
+
+                const totalContributions = allContribs.length;
+                const pendingContributions = allContribs.filter(c => c.status === 'pending').length;
+                const totalAmountContributed = allContribs
+                    .filter(c => c.status === 'approved')
+                    .reduce((sum, c) => sum + Number(c.Contribution_amount || c.amount || 0), 0);
+
+                res.send({
+                    success: true,
+                    totalContributions,
+                    pendingContributions,
+                    totalAmountContributed
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 10b. Creator stats
+        app.get('/api/creator/stats', async (req, res) => {
+            try {
+                const { creatorEmail, userId } = req.query;
+                const conditions = [];
+                if (creatorEmail) {
+                    conditions.push({
+                        $or: [
+                            { creatorEmail: creatorEmail },
+                            { creatorEmail: { $regex: `^${creatorEmail}$`, $options: 'i' } }
+                        ]
+                    });
+                }
+                if (userId) {
+                    conditions.push({ userId: userId });
+                }
+
+                const query = conditions.length > 0 ? (conditions.length === 1 ? conditions[0] : { $or: conditions }) : {};
+
+                const campaigns = await campaignsCollection.find(query).toArray();
+                const totalCampaigns = campaigns.length;
+                const now = new Date();
+                const activeCampaigns = campaigns.filter(c => !c.deadline || new Date(c.deadline) >= now).length;
+                const totalAmountRaised = campaigns.reduce((sum, c) => sum + Number(c.raised_amount || c.amount_raised || 0), 0);
+
+                res.send({
+                    success: true,
+                    totalCampaigns,
+                    activeCampaigns,
+                    totalAmountRaised
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 11a. Create withdrawal
+        app.post('/api/withdrawals', async (req, res) => {
+            try {
+                const { creator_email, creator_name, withdrawal_credit, withdrawal_amount, payment_system, account_number } = req.body;
+                const credits = Number(withdrawal_credit) || 0;
+                if (!creator_email || credits < 200 || !account_number) {
+                    return res.status(400).send({ success: false, message: 'Invalid withdrawal request. Minimum 200 credits required.' });
+                }
+
+                const withdrawalDoc = {
+                    creator_email,
+                    creator_name: creator_name || 'Creator',
+                    withdrawal_credit: credits,
+                    withdrawal_amount: Number(withdrawal_amount) || (credits / 20),
+                    payment_system: payment_system || 'Bank Transfer',
+                    account_number,
+                    status: 'pending',
+                    withdraw_date: new Date().toISOString(),
+                    createdAt: new Date().toISOString()
+                };
+
+                const result = await withdrawalsCollection.insertOne(withdrawalDoc);
+                res.send({ success: true, insertedId: result.insertedId, withdrawal: withdrawalDoc });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 11b. Get creator withdrawals
+        app.get('/api/withdrawals/creator', async (req, res) => {
+            try {
+                const { creatorEmail } = req.query;
+                if (!creatorEmail) {
+                    return res.status(400).send({ success: false, message: 'creatorEmail is required' });
+                }
+                const withdrawals = await withdrawalsCollection.find({ creator_email: creatorEmail }).sort({ createdAt: -1 }).toArray();
+                res.send({ success: true, data: withdrawals });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
             }
         });
 
