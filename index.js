@@ -40,6 +40,8 @@ async function run() {
         const usersCollection = db.collection('user');
         const paymentsCollection = db.collection('payments');
         const withdrawalsCollection = db.collection('withdrawals');
+        const reportsCollection = db.collection('reports');
+        const reviewsCollection = db.collection('reviews');
 
         // 1. Get all approved campaigns (Pagination, Search, Category Filter, Sort)
         app.get('/api/campaigns/approved', async (req, res) => {
@@ -1191,6 +1193,317 @@ async function run() {
                     categoryData,
                     recentWithdrawals
                 });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // ==========================================
+        // 14. REPORTS API ENDPOINTS
+        // ==========================================
+
+        // 14a. Create Report
+        app.post('/api/reports', async (req, res) => {
+            try {
+                const {
+                    userId, userName, userEmail, userImage,
+                    campaignId, campaignName, campaignImage,
+                    creatorId, creatorName, creatorEmail, creatorImage,
+                    reason, details
+                } = req.body;
+
+                if (!userId || !campaignId || !reason) {
+                    return res.status(400).send({ success: false, message: 'Missing required report fields' });
+                }
+
+                const reportDoc = {
+                    userId: userId || null,
+                    userName: userName || 'Anonymous Supporter',
+                    userEmail: userEmail || '',
+                    userImage: userImage || '',
+                    campaignId: campaignId || '',
+                    campaignName: campaignName || '',
+                    campaignImage: campaignImage || '',
+                    creatorId: creatorId || null,
+                    creatorName: creatorName || '',
+                    creatorEmail: creatorEmail || '',
+                    creatorImage: creatorImage || '',
+                    reason,
+                    details: details || '',
+                    status: 'pending',
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                };
+
+                const result = await reportsCollection.insertOne(reportDoc);
+                res.send({ success: true, insertedId: result.insertedId, report: reportDoc });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 14b. Get Admin Reports (Pagination, Search, Status filter)
+        app.get('/api/admin/reports', async (req, res) => {
+            try {
+                const { search = '', status = '', page = 1, limit = 10 } = req.query;
+                const query = {};
+
+                if (status) {
+                    query.status = status;
+                }
+
+                if (search) {
+                    query.$or = [
+                        { campaignName: { $regex: search, $options: 'i' } },
+                        { userName: { $regex: search, $options: 'i' } },
+                        { userEmail: { $regex: search, $options: 'i' } },
+                        { creatorName: { $regex: search, $options: 'i' } },
+                        { reason: { $regex: search, $options: 'i' } }
+                    ];
+                }
+
+                const pageNum = parseInt(page) || 1;
+                const limitNum = parseInt(limit) || 10;
+                const skip = (pageNum - 1) * limitNum;
+
+                const total = await reportsCollection.countDocuments(query);
+                const result = await reportsCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .skip(skip)
+                    .limit(limitNum)
+                    .toArray();
+
+                res.send({
+                    success: true,
+                    total,
+                    page: pageNum,
+                    totalPages: Math.ceil(total / limitNum) || 1,
+                    data: result
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 14c. Get single Report by ID
+        app.get('/api/reports/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const report = await reportsCollection.findOne({ _id: new ObjectId(id) });
+                if (!report) {
+                    return res.status(404).send({ success: false, message: 'Report not found' });
+                }
+                res.send({ success: true, data: report });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 14d. Update Report status
+        app.patch('/api/admin/reports/:id/status', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { status } = req.body;
+
+                if (!['pending', 'resolved', 'dismissed'].includes(status)) {
+                    return res.status(400).send({ success: false, message: 'Invalid status' });
+                }
+
+                const filter = { _id: new ObjectId(id) };
+                const updateDoc = {
+                    $set: {
+                        status,
+                        updatedAt: new Date().toISOString()
+                    }
+                };
+
+                const result = await reportsCollection.updateOne(filter, updateDoc);
+                res.send({ success: true, result });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 14e. Delete Report
+        app.delete('/api/admin/reports/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const filter = { _id: new ObjectId(id) };
+                const result = await reportsCollection.deleteOne(filter);
+                res.send({ success: true, result });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+
+        // ==========================================
+        // 15. REVIEWS API ENDPOINTS
+        // ==========================================
+
+        // 15a. Create Review
+        app.post('/api/reviews', async (req, res) => {
+            try {
+                const {
+                    userId, userName, userEmail, userImage,
+                    campaignId, campaignName, campaignImage,
+                    creatorId, creatorName, creatorEmail, creatorImage,
+                    rating, comment
+                } = req.body;
+
+                if (!userId || !campaignId || !rating || !comment) {
+                    return res.status(400).send({ success: false, message: 'Missing required review fields' });
+                }
+
+                const reviewDoc = {
+                    userId: userId || null,
+                    userName: userName || 'Anonymous Supporter',
+                    userEmail: userEmail || '',
+                    userImage: userImage || '',
+                    campaignId: campaignId || '',
+                    campaignName: campaignName || '',
+                    campaignImage: campaignImage || '',
+                    creatorId: creatorId || null,
+                    creatorName: creatorName || '',
+                    creatorEmail: creatorEmail || '',
+                    creatorImage: creatorImage || '',
+                    rating: Number(rating) || 5,
+                    comment: comment || '',
+                    isFeatured: false,
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                };
+
+                const result = await reviewsCollection.insertOne(reviewDoc);
+                res.send({ success: true, insertedId: result.insertedId, review: reviewDoc });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 15b. Get Reviews (supports campaignId, featured, page, limit)
+        app.get('/api/reviews', async (req, res) => {
+            try {
+                const { campaignId, featured, page = 1, limit = 10 } = req.query;
+                const query = {};
+
+                if (campaignId) {
+                    query.campaignId = campaignId;
+                }
+
+                if (featured === 'true') {
+                    query.isFeatured = true;
+                }
+
+                const pageNum = parseInt(page) || 1;
+                const limitNum = parseInt(limit) || 10;
+                const skip = (pageNum - 1) * limitNum;
+
+                const total = await reviewsCollection.countDocuments(query);
+                const result = await reviewsCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .skip(skip)
+                    .limit(limitNum)
+                    .toArray();
+
+                res.send({
+                    success: true,
+                    total,
+                    page: pageNum,
+                    totalPages: Math.ceil(total / limitNum) || 1,
+                    data: result
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 15c. Get Featured Reviews (for Homepage Testimonials)
+        app.get('/api/reviews/featured', async (req, res) => {
+            try {
+                const result = await reviewsCollection
+                    .find({ isFeatured: true })
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.send({
+                    success: true,
+                    data: result
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 15d. Get Admin Reviews (Pagination & Search)
+        app.get('/api/admin/reviews', async (req, res) => {
+            try {
+                const { search = '', page = 1, limit = 10 } = req.query;
+                const query = {};
+
+                if (search) {
+                    query.$or = [
+                        { campaignName: { $regex: search, $options: 'i' } },
+                        { userName: { $regex: search, $options: 'i' } },
+                        { userEmail: { $regex: search, $options: 'i' } },
+                        { comment: { $regex: search, $options: 'i' } }
+                    ];
+                }
+
+                const pageNum = parseInt(page) || 1;
+                const limitNum = parseInt(limit) || 10;
+                const skip = (pageNum - 1) * limitNum;
+
+                const total = await reviewsCollection.countDocuments(query);
+                const result = await reviewsCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .skip(skip)
+                    .limit(limitNum)
+                    .toArray();
+
+                res.send({
+                    success: true,
+                    total,
+                    page: pageNum,
+                    totalPages: Math.ceil(total / limitNum) || 1,
+                    data: result
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 15e. Toggle or update review featured status (Admin)
+        app.patch('/api/admin/reviews/:id/featured', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { isFeatured } = req.body;
+
+                const filter = { _id: new ObjectId(id) };
+                const updateDoc = {
+                    $set: {
+                        isFeatured: Boolean(isFeatured),
+                        updatedAt: new Date().toISOString()
+                    }
+                };
+
+                const result = await reviewsCollection.updateOne(filter, updateDoc);
+                res.send({ success: true, result });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 15f. Delete Review (Admin)
+        app.delete('/api/admin/reviews/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const filter = { _id: new ObjectId(id) };
+                const result = await reviewsCollection.deleteOne(filter);
+                res.send({ success: true, result });
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
             }
