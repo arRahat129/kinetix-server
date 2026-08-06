@@ -2,6 +2,7 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
+const { createRemoteJWKSet, jwtVerify } = require('jose-cjs');
 
 dotenv.config();
 
@@ -16,6 +17,61 @@ app.use(cors({
     credentials: true
 }));
 app.use(express.json());
+
+// ==========================================
+// JWT VERIFICATION MIDDLEWARE
+// ==========================================
+
+const JWKS = createRemoteJWKSet(
+    new URL(`${process.env.BETTER_AUTH_URL}/api/auth/jwks`)
+);
+
+const verifyToken = async (req, res, next) => {
+    const authHeader = req?.headers.authorization;
+    if (!authHeader) {
+        return res.status(401).json({ message: 'Unauthorized || No token provided' });
+    }
+    const token = authHeader.split(' ')[1];
+    if (!token) {
+        return res.status(401).json({ message: 'Unauthorized || Malformed token' });
+    }
+    try {
+        const { payload } = await jwtVerify(token, JWKS);
+        req.user = payload;
+        next();
+    } catch (error) {
+        console.error('JWT ERROR:', error.message);
+        return res.status(403).json({ message: 'Forbidden || Invalid or expired token' });
+    }
+};
+
+// Role-based guards (all also require a valid token)
+const verifyAdmin = async (req, res, next) => {
+    await verifyToken(req, res, () => {
+        if (req.user?.role !== 'Admin') {
+            return res.status(403).json({ message: 'Forbidden || Admin access required' });
+        }
+        next();
+    });
+};
+
+const verifyCreator = async (req, res, next) => {
+    await verifyToken(req, res, () => {
+        if (!['Creator', 'Admin'].includes(req.user?.role)) {
+            return res.status(403).json({ message: 'Forbidden || Creator access required' });
+        }
+        next();
+    });
+};
+
+const verifySupporter = async (req, res, next) => {
+    await verifyToken(req, res, () => {
+        if (!['Supporter', 'Admin'].includes(req.user?.role)) {
+            return res.status(403).json({ message: 'Forbidden || Supporter access required' });
+        }
+        next();
+    });
+};
 
 app.get('/', (req, res) => {
     res.send('Kinetix Server is running!');
@@ -97,7 +153,7 @@ async function run() {
         });
 
         // 2. Get individual user's campaigns by userId (Pagination, Single Status Filter, Search, Deadline Descending Sort default)
-        app.get('/api/campaigns/my-campaigns', async (req, res) => {
+        app.get('/api/campaigns/my-campaigns', verifyToken, async (req, res) => {
             try {
                 const {
                     userId,
@@ -156,7 +212,7 @@ async function run() {
         });
 
         // 3. Get single campaign by ID
-        app.get('/api/campaigns/:id', async (req, res) => {
+        app.get('/api/campaigns/:id', verifyToken, async (req, res) => {
             try {
                 const { id } = req.params;
                 const campaign = await campaignsCollection.findOne({ _id: new ObjectId(id) });
@@ -170,14 +226,14 @@ async function run() {
         });
 
         // 4. Create Campaign
-        app.post('/api/campaigns', async (req, res) => {
+        app.post('/api/campaigns', verifyCreator, async (req, res) => {
             const campaignData = req.body;
             const result = await campaignsCollection.insertOne(campaignData);
             res.send(result);
         });
 
         // 4. Update Campaign
-        app.patch('/api/campaigns/:id', async (req, res) => {
+        app.patch('/api/campaigns/:id', verifyCreator, async (req, res) => {
             try {
                 const { id } = req.params;
                 const updateData = req.body;
@@ -202,7 +258,7 @@ async function run() {
         });
 
         // 5. Delete Campaign & Refund Approved Supporters
-        app.delete('/api/campaigns/:id', async (req, res) => {
+        app.delete('/api/campaigns/:id', verifyToken, async (req, res) => {
             try {
                 const { id } = req.params;
 
@@ -251,7 +307,7 @@ async function run() {
         // 6. ADMIN ROUTES
 
         // 6a. Get all users
-        app.get('/api/admin/users', async (req, res) => {
+        app.get('/api/admin/users', verifyAdmin, async (req, res) => {
             try {
                 const { search = '', role = '' } = req.query;
                 const query = {};
@@ -274,7 +330,7 @@ async function run() {
         });
 
         // 6b. Delete user
-        app.delete('/api/admin/users/:id', async (req, res) => {
+        app.delete('/api/admin/users/:id', verifyAdmin, async (req, res) => {
             try {
                 const { id } = req.params;
                 const filter = { _id: new ObjectId(id) };
@@ -286,7 +342,7 @@ async function run() {
         });
 
         // 6c. Update user role (Admin, Creator, Supporter) & recalculate default role credits
-        app.patch('/api/admin/users/:id/role', async (req, res) => {
+        app.patch('/api/admin/users/:id/role', verifyAdmin, async (req, res) => {
             try {
                 const { id } = req.params;
                 const { role } = req.body;
@@ -326,7 +382,7 @@ async function run() {
         });
 
         // 7. Payment Verification & Credit Addition
-        app.post('/api/payments/verify', async (req, res) => {
+        app.post('/api/payments/verify', verifyToken, async (req, res) => {
             try {
                 const { stripeSessionId, userEmail, creditsToAdd, amount, userId, userName, userImage } = req.body;
 
@@ -383,7 +439,7 @@ async function run() {
         });
 
         // 8. User Payment History
-        app.get('/api/payments/my-history', async (req, res) => {
+        app.get('/api/payments/my-history', verifyToken, async (req, res) => {
             try {
                 const { userEmail } = req.query;
                 if (!userEmail) {
@@ -400,7 +456,7 @@ async function run() {
         });
 
         // 6d. Get all campaigns for admin (Supports search, status filter e.g. pending)
-        app.get('/api/admin/campaigns', async (req, res) => {
+        app.get('/api/admin/campaigns', verifyAdmin, async (req, res) => {
             try {
                 const { search = '', status = '', page = 1, limit = 50 } = req.query;
                 const query = {};
@@ -441,7 +497,7 @@ async function run() {
         });
 
         // 6e. Update campaign status (approved / rejected)
-        app.patch('/api/admin/campaigns/:id/status', async (req, res) => {
+        app.patch('/api/admin/campaigns/:id/status', verifyAdmin, async (req, res) => {
             try {
                 const { id } = req.params;
                 const { status } = req.body;
@@ -466,7 +522,7 @@ async function run() {
         });
 
         // 9a. Create contribution (deducts credits immediately)
-        app.post('/api/contributions', async (req, res) => {
+        app.post('/api/contributions', verifySupporter, async (req, res) => {
             try {
                 const {
                     campaign_id, campaignId, campaign_title, creator_email, creatorEmail,
@@ -521,7 +577,7 @@ async function run() {
         });
 
         // 9b. Get contributions (supports supporterEmail, creatorEmail, campaignId, status, search, pagination)
-        app.get('/api/contributions', async (req, res) => {
+        app.get('/api/contributions', verifyToken, async (req, res) => {
             try {
                 const { supporterEmail, creatorEmail, campaignId, status, search, page = 1, limit = 10 } = req.query;
                 const conditions = [];
@@ -597,7 +653,7 @@ async function run() {
         });
 
         // 9c. Approve contribution (Creator accepts contribution: credits added to creator balance, increment campaign stats)
-        app.patch('/api/contributions/:id/approve', async (req, res) => {
+        app.patch('/api/contributions/:id/approve', verifyCreator, async (req, res) => {
             try {
                 const { id } = req.params;
                 const filter = { _id: new ObjectId(id) };
@@ -646,7 +702,7 @@ async function run() {
         });
 
         // 9d. Reject contribution (refunds credits to supporter)
-        app.patch('/api/contributions/:id/reject', async (req, res) => {
+        app.patch('/api/contributions/:id/reject', verifyCreator, async (req, res) => {
             try {
                 const { id } = req.params;
                 const filter = { _id: new ObjectId(id) };
@@ -680,7 +736,7 @@ async function run() {
         });
 
         // 9e. Update contribution (Supporter updates details or amount of pending/approved/rejected)
-        app.patch('/api/contributions/:id', async (req, res) => {
+        app.patch('/api/contributions/:id', verifySupporter, async (req, res) => {
             try {
                 const { id } = req.params;
                 const { Contribution_amount, amount, message } = req.body;
@@ -735,7 +791,7 @@ async function run() {
         });
 
         // 9f. Delete/Withdraw contribution (Supporter cancels contribution)
-        app.delete('/api/contributions/:id', async (req, res) => {
+        app.delete('/api/contributions/:id', verifySupporter, async (req, res) => {
             try {
                 const { id } = req.params;
                 const filter = { _id: new ObjectId(id) };
@@ -796,7 +852,7 @@ async function run() {
         });
 
         // 10a. Supporter stats
-        app.get('/api/supporter/stats', async (req, res) => {
+        app.get('/api/supporter/stats', verifySupporter, async (req, res) => {
             try {
                 const { supporterEmail } = req.query;
                 if (!supporterEmail) {
@@ -831,7 +887,7 @@ async function run() {
         });
 
         // 10b. Creator stats
-        app.get('/api/creator/stats', async (req, res) => {
+        app.get('/api/creator/stats', verifyCreator, async (req, res) => {
             try {
                 const { creatorEmail, userId } = req.query;
                 const conditions = [];
@@ -877,7 +933,7 @@ async function run() {
         });
 
         // 11a. Create withdrawal request (Creator requests withdrawal; credits immediately deducted)
-        app.post('/api/withdrawals', async (req, res) => {
+        app.post('/api/withdrawals', verifyCreator, async (req, res) => {
             try {
                 const { creator_email, creator_name, withdrawal_credit, payment_system, account_number } = req.body;
                 const credits = Number(withdrawal_credit) || 0;
@@ -922,7 +978,7 @@ async function run() {
         });
 
         // 11b. Update pending withdrawal request (adjusts creator credits accordingly)
-        app.patch('/api/withdrawals/:id', async (req, res) => {
+        app.patch('/api/withdrawals/:id', verifyCreator, async (req, res) => {
             try {
                 const { id } = req.params;
                 const { withdrawal_credit, payment_system, account_number } = req.body;
@@ -982,7 +1038,7 @@ async function run() {
         });
 
         // 11c. Delete / cancel withdrawal request (refunds creator credits)
-        app.delete('/api/withdrawals/:id', async (req, res) => {
+        app.delete('/api/withdrawals/:id', verifyCreator, async (req, res) => {
             try {
                 const { id } = req.params;
                 const filter = { _id: new ObjectId(id) };
@@ -1010,7 +1066,7 @@ async function run() {
         });
 
         // 11d. Get creator withdrawals
-        app.get('/api/withdrawals/creator', async (req, res) => {
+        app.get('/api/withdrawals/creator', verifyCreator, async (req, res) => {
             try {
                 const { creatorEmail } = req.query;
                 if (!creatorEmail) {
@@ -1024,7 +1080,7 @@ async function run() {
         });
 
         // 11e. Get all withdrawals (for Admin)
-        app.get('/api/admin/withdrawals', async (req, res) => {
+        app.get('/api/admin/withdrawals', verifyAdmin, async (req, res) => {
             try {
                 const { status = '', search = '', page = 1, limit = 10 } = req.query;
                 const query = {};
@@ -1065,7 +1121,7 @@ async function run() {
         });
 
         // 11f. Admin update withdrawal status (Approve / Reject)
-        app.patch('/api/admin/withdrawals/:id/status', async (req, res) => {
+        app.patch('/api/admin/withdrawals/:id/status', verifyAdmin, async (req, res) => {
             try {
                 const { id } = req.params;
                 const { status, adminNote = '' } = req.body;
@@ -1110,7 +1166,7 @@ async function run() {
         });
 
         // 12. Admin Stats
-        app.get('/api/admin/stats', async (req, res) => {
+        app.get('/api/admin/stats', verifyAdmin, async (req, res) => {
             try {
                 const totalUsers = await usersCollection.countDocuments();
                 const supportersCount = await usersCollection.countDocuments({ role: 'Supporter' });
@@ -1203,7 +1259,7 @@ async function run() {
         // ==========================================
 
         // 14a. Create Report
-        app.post('/api/reports', async (req, res) => {
+        app.post('/api/reports', verifySupporter, async (req, res) => {
             try {
                 const {
                     userId, userName, userEmail, userImage,
@@ -1243,7 +1299,7 @@ async function run() {
         });
 
         // 14b. Get Admin Reports (Pagination, Search, Status filter)
-        app.get('/api/admin/reports', async (req, res) => {
+        app.get('/api/admin/reports', verifyAdmin, async (req, res) => {
             try {
                 const { search = '', status = '', page = 1, limit = 10 } = req.query;
                 const query = {};
@@ -1301,7 +1357,7 @@ async function run() {
         });
 
         // 14d. Update Report status
-        app.patch('/api/admin/reports/:id/status', async (req, res) => {
+        app.patch('/api/admin/reports/:id/status', verifyAdmin, async (req, res) => {
             try {
                 const { id } = req.params;
                 const { status } = req.body;
@@ -1326,7 +1382,7 @@ async function run() {
         });
 
         // 14e. Delete Report
-        app.delete('/api/admin/reports/:id', async (req, res) => {
+        app.delete('/api/admin/reports/:id', verifyAdmin, async (req, res) => {
             try {
                 const { id } = req.params;
                 const filter = { _id: new ObjectId(id) };
@@ -1343,7 +1399,7 @@ async function run() {
         // ==========================================
 
         // 15a. Create Review
-        app.post('/api/reviews', async (req, res) => {
+        app.post('/api/reviews', verifySupporter, async (req, res) => {
             try {
                 const {
                     userId, userName, userEmail, userImage,
@@ -1438,7 +1494,7 @@ async function run() {
         });
 
         // 15d. Get Admin Reviews (Pagination & Search)
-        app.get('/api/admin/reviews', async (req, res) => {
+        app.get('/api/admin/reviews', verifyAdmin, async (req, res) => {
             try {
                 const { search = '', page = 1, limit = 10 } = req.query;
                 const query = {};
@@ -1477,7 +1533,7 @@ async function run() {
         });
 
         // 15e. Toggle or update review featured status (Admin)
-        app.patch('/api/admin/reviews/:id/featured', async (req, res) => {
+        app.patch('/api/admin/reviews/:id/featured', verifyAdmin, async (req, res) => {
             try {
                 const { id } = req.params;
                 const { isFeatured } = req.body;
@@ -1498,7 +1554,7 @@ async function run() {
         });
 
         // 15f. Delete Review (Admin)
-        app.delete('/api/admin/reviews/:id', async (req, res) => {
+        app.delete('/api/admin/reviews/:id', verifyAdmin, async (req, res) => {
             try {
                 const { id } = req.params;
                 const filter = { _id: new ObjectId(id) };
