@@ -10,10 +10,17 @@ const app = express();
 const port = process.env.PORT || 5000;
 
 app.use(cors({
-    origin: [
-        "http://localhost:3000",
-        "http://localhost:5000",
-    ],
+    origin: (origin, callback) => {
+        if (!origin) return callback(null, true);
+        if (
+            origin.startsWith('http://localhost') ||
+            origin.endsWith('.vercel.app') ||
+            (process.env.BETTER_AUTH_URL && origin.includes(process.env.BETTER_AUTH_URL))
+        ) {
+            return callback(null, true);
+        }
+        return callback(null, true);
+    },
     credentials: true
 }));
 app.use(express.json());
@@ -73,8 +80,400 @@ const verifySupporter = async (req, res, next) => {
     });
 };
 
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        status: 'online',
+        service: 'Kinetix Server API Engine',
+        timestamp: new Date().toISOString(),
+        uptime: `${Math.floor(process.uptime())}s`,
+        environment: process.env.NODE_ENV || 'development'
+    });
+});
+
 app.get('/', (req, res) => {
-    res.send('Kinetix Server is running!');
+    res.setHeader('Content-Type', 'text/html');
+    res.send(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KINETIX Engine — Server API</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    :root {
+      --bg: #060b18;
+      --card-bg: rgba(15, 23, 42, 0.75);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --primary: #3b82f6;
+      --accent: #8b5cf6;
+      --cyan: #06b6d4;
+      --emerald: #10b981;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+    }
+    body {
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2.5rem 1rem;
+      position: relative;
+      overflow-x: hidden;
+    }
+    .glow-1 {
+      position: absolute;
+      top: -15%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 700px;
+      height: 700px;
+      background: radial-gradient(circle, rgba(59, 130, 246, 0.18) 0%, rgba(6, 11, 24, 0) 70%);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .glow-2 {
+      position: absolute;
+      bottom: -15%;
+      left: -10%;
+      width: 500px;
+      height: 500px;
+      background: radial-gradient(circle, rgba(139, 92, 246, 0.15) 0%, rgba(6, 11, 24, 0) 70%);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .glow-3 {
+      position: absolute;
+      bottom: -15%;
+      right: -10%;
+      width: 500px;
+      height: 500px;
+      background: radial-gradient(circle, rgba(6, 182, 212, 0.15) 0%, rgba(6, 11, 24, 0) 70%);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .container {
+      max-width: 920px;
+      width: 100%;
+      z-index: 10;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 2.5rem;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 1.1rem;
+      border-radius: 9999px;
+      background: rgba(16, 185, 129, 0.1);
+      border: 1px solid rgba(16, 185, 129, 0.25);
+      color: #34d399;
+      font-size: 0.8rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 1.25rem;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: #34d399;
+      box-shadow: 0 0 12px #34d399;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+    .title {
+      font-size: 3.25rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.15;
+      margin-bottom: 0.85rem;
+      background: linear-gradient(135deg, #ffffff 30%, #93c5fd 70%, #c084fc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 1.1rem;
+      max-width: 620px;
+      margin: 0 auto;
+      line-height: 1.6;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1.25rem;
+      margin-bottom: 2rem;
+    }
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--card-border);
+      border-radius: 1.25rem;
+      padding: 1.5rem;
+      transition: all 0.3s ease;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    }
+    .card:hover {
+      border-color: rgba(59, 130, 246, 0.35);
+      transform: translateY(-3px);
+      box-shadow: 0 15px 35px rgba(59, 130, 246, 0.15);
+    }
+    .card-title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+    .card-value {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .card-desc {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-top: 0.35rem;
+    }
+    .endpoints-section {
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--card-border);
+      border-radius: 1.5rem;
+      padding: 1.75rem;
+      margin-bottom: 2rem;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    }
+    .section-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 1.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .endpoint-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .endpoint-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.85rem 1.15rem;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 0.875rem;
+      transition: background 0.2s ease;
+    }
+    .endpoint-item:hover {
+      background: rgba(255, 255, 255, 0.06);
+    }
+    .endpoint-left {
+      display: flex;
+      align-items: center;
+      gap: 0.85rem;
+    }
+    .method-get {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.25rem 0.6rem;
+      border-radius: 0.4rem;
+    }
+    .method-post {
+      background: rgba(59, 130, 246, 0.15);
+      color: #60a5fa;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.25rem 0.6rem;
+      border-radius: 0.4rem;
+    }
+    .endpoint-path {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9rem;
+      font-weight: 500;
+      color: #e2e8f0;
+    }
+    .endpoint-auth {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.05);
+      padding: 0.2rem 0.5rem;
+      border-radius: 0.35rem;
+    }
+    .actions {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.85rem 1.75rem;
+      border-radius: 0.875rem;
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      color: white;
+      font-weight: 700;
+      font-size: 0.95rem;
+      text-decoration: none;
+      box-shadow: 0 10px 25px rgba(37, 99, 235, 0.35);
+      transition: all 0.25s ease;
+    }
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 15px 30px rgba(37, 99, 235, 0.5);
+    }
+    .btn-secondary {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.85rem 1.75rem;
+      border-radius: 0.875rem;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #cbd5e1;
+      font-weight: 600;
+      font-size: 0.95rem;
+      text-decoration: none;
+      transition: all 0.25s ease;
+    }
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: white;
+    }
+    .footer {
+      text-align: center;
+      margin-top: 3rem;
+      color: #64748b;
+      font-size: 0.825rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="glow-1"></div>
+  <div class="glow-2"></div>
+  <div class="glow-3"></div>
+
+  <div class="container">
+    <header class="header">
+      <div class="badge">
+        <span class="dot"></span>
+        <span>Kinetix API • Active & Operational</span>
+      </div>
+      <h1 class="title">KINETIX Server Engine</h1>
+      <p class="subtitle">High-performance crowdfunding REST API powering campaigns, secure credit contributions, authentication & user management.</p>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-title">Server Status</div>
+        <div class="card-value" style="color: #34d399;">⚡ Operational</div>
+        <div class="card-desc">Express Engine on Node.js</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Database</div>
+        <div class="card-value" style="color: #60a5fa;">🍃 MongoDB</div>
+        <div class="card-desc">kinetix_db Database</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Security</div>
+        <div class="card-value" style="color: #a78bfa;">🔒 Better Auth</div>
+        <div class="card-desc">JWKS & RBAC Guards</div>
+      </div>
+    </div>
+
+    <div class="endpoints-section">
+      <div class="section-title">
+        <span>Public (Unprotected) REST Endpoints</span>
+        <span style="font-size: 0.8rem; font-weight: 500; color: #64748b;">Click to test in browser</span>
+      </div>
+      <div class="endpoint-list">
+        <a href="/health" target="_blank" style="text-decoration: none;" class="endpoint-item">
+          <div class="endpoint-left">
+            <span class="method-get">GET</span>
+            <span class="endpoint-path">/health</span>
+          </div>
+          <span class="endpoint-auth" style="color: #34d399;">Public System Health</span>
+        </a>
+        <a href="/api/campaigns/approved" target="_blank" style="text-decoration: none;" class="endpoint-item">
+          <div class="endpoint-left">
+            <span class="method-get">GET</span>
+            <span class="endpoint-path">/api/campaigns/approved</span>
+          </div>
+          <span class="endpoint-auth" style="color: #34d399;">Public Approved Campaigns</span>
+        </a>
+        <a href="/api/reviews" target="_blank" style="text-decoration: none;" class="endpoint-item">
+          <div class="endpoint-left">
+            <span class="method-get">GET</span>
+            <span class="endpoint-path">/api/reviews</span>
+          </div>
+          <span class="endpoint-auth" style="color: #34d399;">Public Reviews</span>
+        </a>
+        <a href="/api/reviews/featured" target="_blank" style="text-decoration: none;" class="endpoint-item">
+          <div class="endpoint-left">
+            <span class="method-get">GET</span>
+            <span class="endpoint-path">/api/reviews/featured</span>
+          </div>
+          <span class="endpoint-auth" style="color: #34d399;">Public Featured Reviews</span>
+        </a>
+      </div>
+    </div>
+
+    <div class="actions">
+      <a href="/health" class="btn-primary" target="_blank">
+        ⚡ Check Health Status (JSON)
+      </a>
+      <a href="/api/campaigns/approved" class="btn-secondary" target="_blank">
+        🚀 View Approved Campaigns
+      </a>
+      <a href="/api/reviews" class="btn-secondary" target="_blank">
+        ⭐ View Public Reviews
+      </a>
+    </div>
+
+    <footer class="footer">
+      <p>© 2026 KINETIX Platform • Vercel Serverless Ready</p>
+    </footer>
+  </div>
+</body>
+</html>
+    `);
 });
 
 const uri = process.env.MONGO_DB_URI;
@@ -88,7 +487,7 @@ const client = new MongoClient(uri, {
 });
 async function run() {
     try {
-        await client.connect();
+        // await client.connect();
 
         const db = client.db('kinetix_db');
         const campaignsCollection = db.collection('campaigns');
@@ -1566,7 +1965,7 @@ async function run() {
         });
 
 
-        await client.db("admin").command({ ping: 1 });
+        // await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } catch (error) {
         console.error("MongoDB Connection Error:", error);
@@ -1576,6 +1975,10 @@ run().catch(console.dir);
 
 
 
-app.listen(port, () => {
-    console.log(`Kinetix Server is running on port ${port}`);
-});
+if (process.env.NODE_ENV !== 'production' || require.main === module) {
+    app.listen(port, () => {
+        console.log(`Kinetix Server is running on port ${port}`);
+    });
+}
+
+module.exports = app;
