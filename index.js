@@ -497,6 +497,61 @@ async function run() {
         const withdrawalsCollection = db.collection('withdrawals');
         const reportsCollection = db.collection('reports');
         const reviewsCollection = db.collection('reviews');
+        const notificationsCollection = db.collection('notifications');
+
+        // Helper: Create Notification
+        const createNotification = async ({
+            message,
+            toEmail = null,
+            toRole = null,
+            fromEmail = '',
+            fromName = '',
+            type = 'info',
+            targetId = null,
+            status = 'pending',
+            actionRoute = '/dashboard'
+        }) => {
+            try {
+                const notifDoc = {
+                    message,
+                    toEmail: toEmail ? toEmail.trim() : null,
+                    toRole: toRole ? toRole.trim().toLowerCase() : null,
+                    fromEmail,
+                    fromName,
+                    type,
+                    targetId: targetId ? String(targetId) : null,
+                    status,
+                    resolvedBy: null,
+                    resolvedAt: null,
+                    isRead: false,
+                    isReadBy: [],
+                    actionRoute,
+                    time: new Date()
+                };
+                await notificationsCollection.insertOne(notifDoc);
+            } catch (err) {
+                console.error("Failed to create notification:", err);
+            }
+        };
+
+        // Helper: Resolve Role-based Notifications
+        const resolveNotificationsByTarget = async (targetId, type, resolvedByEmail) => {
+            try {
+                if (!targetId) return;
+                await notificationsCollection.updateMany(
+                    { targetId: String(targetId), type, status: 'pending' },
+                    {
+                        $set: {
+                            status: 'resolved',
+                            resolvedBy: resolvedByEmail,
+                            resolvedAt: new Date()
+                        }
+                    }
+                );
+            } catch (err) {
+                console.error("Failed to resolve notifications:", err);
+            }
+        };
 
         // 1. Get all approved campaigns (Pagination, Search, Category Filter, Sort)
         app.get('/api/campaigns/approved', async (req, res) => {
@@ -747,6 +802,19 @@ async function run() {
         app.post('/api/campaigns', verifyCreator, async (req, res) => {
             const campaignData = req.body;
             const result = await campaignsCollection.insertOne(campaignData);
+
+            // Notify all admins about the new campaign
+            await createNotification({
+                message: `New campaign '${campaignData.campaign_title || 'Untitled'}' submitted by ${campaignData.creator_name || campaignData.userEmail || 'a Creator'} awaiting approval.`,
+                toRole: 'admin',
+                fromEmail: campaignData.userEmail || campaignData.creator_email || '',
+                fromName: campaignData.creator_name || 'Creator',
+                type: 'campaign_request',
+                targetId: result.insertedId,
+                status: 'pending',
+                actionRoute: '/dashboard/admin'
+            });
+
             res.send(result);
         });
 
@@ -1033,6 +1101,29 @@ async function run() {
                 };
 
                 const result = await campaignsCollection.updateOne(filter, updateDoc);
+
+                // Fetch campaign info for notification
+                const campaignDoc = await campaignsCollection.findOne(filter);
+                if (campaignDoc) {
+                    // Resolve admin notification
+                    await resolveNotificationsByTarget(id, 'campaign_request', req.user?.email || 'Admin');
+
+                    // Notify creator of campaign status update
+                    const creatorEmail = campaignDoc.userEmail || campaignDoc.creator_email;
+                    if (creatorEmail) {
+                        await createNotification({
+                            message: `Your campaign '${campaignDoc.campaign_title || 'campaign'}' was ${status} by Admin.`,
+                            toEmail: creatorEmail,
+                            fromEmail: req.user?.email || 'admin@kinetix.com',
+                            fromName: 'Admin',
+                            type: 'campaign_status',
+                            targetId: id,
+                            status: 'info',
+                            actionRoute: '/dashboard/creator'
+                        });
+                    }
+                }
+
                 res.send({ success: true, result });
             } catch (error) {
                 res.status(500).send({ message: error.message });
@@ -1088,6 +1179,22 @@ async function run() {
                 };
 
                 const result = await contributionsCollection.insertOne(contributionDoc);
+
+                // Notify creator about the new contribution request
+                const creatorMail = creator_email || creatorEmail;
+                if (creatorMail) {
+                    await createNotification({
+                        message: `New contribution of ${amountVal} credits received for '${campaign_title || 'your campaign'}' from ${Supporter_name || suppEmail}.`,
+                        toEmail: creatorMail,
+                        fromEmail: suppEmail,
+                        fromName: Supporter_name || suppEmail,
+                        type: 'contribution_request',
+                        targetId: result.insertedId,
+                        status: 'pending',
+                        actionRoute: '/dashboard/creator'
+                    });
+                }
+
                 res.send({ success: true, insertedId: result.insertedId, contribution: contributionDoc });
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
@@ -1214,6 +1321,23 @@ async function run() {
                 }
 
                 res.send({ success: true, message: 'Contribution approved and creator credited successfully' });
+
+                // Notify supporter that contribution was approved
+                const suppEmail = contribution.Supporter_email || contribution.userEmail;
+                const campTitle = contribution.campaign_title || 'the campaign';
+                const creatorName = contribution.creator_name || 'Creator';
+                if (suppEmail) {
+                    await createNotification({
+                        message: `Your Contribution of ${amountVal} credits to ${campTitle} was approved by ${creatorName}`,
+                        toEmail: suppEmail,
+                        fromEmail: creatorEmail || '',
+                        fromName: creatorName,
+                        type: 'contribution_status',
+                        targetId: id,
+                        status: 'info',
+                        actionRoute: '/dashboard/supporter'
+                    });
+                }
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
             }
@@ -1248,6 +1372,23 @@ async function run() {
                 }
 
                 res.send({ success: true, message: 'Contribution rejected and credits refunded' });
+
+                // Notify supporter that contribution was rejected
+                const campTitle = contribution.campaign_title || 'the campaign';
+                const creatorName = contribution.creator_name || 'Creator';
+                const creatorEmail = contribution.creator_email || contribution.creatorEmail;
+                if (suppEmail) {
+                    await createNotification({
+                        message: `Your Contribution of ${amountVal} credits to ${campTitle} was rejected by ${creatorName}`,
+                        toEmail: suppEmail,
+                        fromEmail: creatorEmail || '',
+                        fromName: creatorName,
+                        type: 'contribution_status',
+                        targetId: id,
+                        status: 'info',
+                        actionRoute: '/dashboard/supporter'
+                    });
+                }
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
             }
@@ -1489,6 +1630,19 @@ async function run() {
                 };
 
                 const result = await withdrawalsCollection.insertOne(withdrawalDoc);
+
+                // Notify admins of new withdrawal request
+                await createNotification({
+                    message: `New withdrawal request of ${credits} credits submitted by ${creator_name || creator_email}.`,
+                    toRole: 'admin',
+                    fromEmail: creator_email,
+                    fromName: creator_name || 'Creator',
+                    type: 'withdrawal_request',
+                    targetId: result.insertedId,
+                    status: 'pending',
+                    actionRoute: '/dashboard/admin'
+                });
+
                 res.send({ success: true, insertedId: result.insertedId, data: withdrawalDoc });
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
@@ -1677,7 +1831,116 @@ async function run() {
                     }
                 });
 
+                // Resolve admin notification
+                await resolveNotificationsByTarget(id, 'withdrawal_request', req.user?.email || 'Admin');
+
+                // Notify creator of withdrawal decision
+                const creatorEmail = withdrawalReq.creator_email;
+                if (creatorEmail) {
+                    await createNotification({
+                        message: `Your withdrawal request of ${withdrawalReq.withdrawal_credit} credits was ${status} by Admin.`,
+                        toEmail: creatorEmail,
+                        fromEmail: req.user?.email || 'admin@kinetix.com',
+                        fromName: 'Admin',
+                        type: 'withdrawal_status',
+                        targetId: id,
+                        status: 'info',
+                        actionRoute: '/dashboard/creator'
+                    });
+                }
+
                 res.send({ success: true, message: `Withdrawal request successfully ${status}.` });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 11g. Notification APIs
+        // Get user notifications (matching email or role)
+        app.get('/api/notifications', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.query.email || req.user?.email;
+                const userRole = (req.query.role || req.user?.role || '').toLowerCase();
+
+                if (!userEmail) {
+                    return res.status(400).send({ success: false, message: 'User email is required' });
+                }
+
+                const orConditions = [
+                    { toEmail: { $regex: `^${userEmail.trim()}$`, $options: 'i' } }
+                ];
+
+                if (userRole === 'admin') {
+                    orConditions.push({ toRole: 'admin' });
+                }
+
+                const notifications = await notificationsCollection
+                    .find({ $or: orConditions })
+                    .sort({ time: -1 })
+                    .limit(100)
+                    .toArray();
+
+                const formatted = notifications.map(n => ({
+                    ...n,
+                    isRead: n.isRead || (Array.isArray(n.isReadBy) && n.isReadBy.includes(userEmail))
+                }));
+
+                res.send({ success: true, data: formatted });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // Mark single notification as read
+        app.patch('/api/notifications/:id/read', verifyToken, async (req, res) => {
+            try {
+                const { id } = req.params;
+                const userEmail = req.body.email || req.query.email || req.user?.email || '';
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ success: false, message: 'Invalid notification ID' });
+                }
+
+                await notificationsCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: { isRead: true },
+                        $addToSet: { isReadBy: userEmail }
+                    }
+                );
+
+                res.send({ success: true, message: 'Notification marked as read' });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // Mark all notifications as read for user
+        app.patch('/api/notifications/read-all', verifyToken, async (req, res) => {
+            try {
+                const userEmail = req.body.email || req.query.email || req.user?.email || '';
+                const userRole = (req.body.role || req.query.role || req.user?.role || '').toLowerCase();
+
+                if (!userEmail) {
+                    return res.status(400).send({ success: false, message: 'User email is required' });
+                }
+
+                const orConditions = [
+                    { toEmail: { $regex: `^${userEmail.trim()}$`, $options: 'i' } }
+                ];
+                if (userRole === 'admin') {
+                    orConditions.push({ toRole: 'admin' });
+                }
+
+                await notificationsCollection.updateMany(
+                    { $or: orConditions },
+                    {
+                        $set: { isRead: true },
+                        $addToSet: { isReadBy: userEmail }
+                    }
+                );
+
+                res.send({ success: true, message: 'All notifications marked as read' });
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
             }
