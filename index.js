@@ -551,6 +551,125 @@ async function run() {
             }
         });
 
+        // 1b. Get Top Funded Approved Campaigns (Limit 6, sorted by raised amount descending with precalculated progress)
+        app.get('/api/campaigns/top-funded', async (req, res) => {
+            try {
+                const limit = parseInt(req.query.limit) || 6;
+
+                const topCampaigns = await campaignsCollection.aggregate([
+                    { $match: { status: 'approved' } },
+                    {
+                        $addFields: {
+                            raised: {
+                                $toDouble: {
+                                    $ifNull: ["$raised_amount", { $ifNull: ["$amount_raised", 0] }]
+                                }
+                            },
+                            goal: {
+                                $toDouble: {
+                                    $ifNull: ["$funding_goal", 1]
+                                }
+                            }
+                        }
+                    },
+                    {
+                        $addFields: {
+                            progress: {
+                                $cond: [
+                                    { $gt: ["$goal", 0] },
+                                    { $round: [{ $multiply: [{ $divide: ["$raised", "$goal"] }, 100] }, 0] },
+                                    0
+                                ]
+                            }
+                        }
+                    },
+                    { $sort: { raised: -1, createdAt: -1 } },
+                    { $limit: limit }
+                ]).toArray();
+
+                res.send({
+                    success: true,
+                    data: topCampaigns
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 1c. Get Platform Impact Statistics (Supporter users count, approved campaigns count, total credits raised, success rate %)
+        app.get('/api/platform/impact', async (req, res) => {
+            try {
+                // Count active supporters (users with role 'Supporter', case-insensitive)
+                const activeSupporters = await usersCollection.countDocuments({
+                    role: { $regex: /^supporter$/i }
+                });
+
+                // Aggregate stats for approved campaigns
+                const campaignStats = await campaignsCollection.aggregate([
+                    { $match: { status: 'approved' } },
+                    {
+                        $addFields: {
+                            raised: {
+                                $toDouble: {
+                                    $ifNull: ["$raised_amount", { $ifNull: ["$amount_raised", 0] }]
+                                }
+                            },
+                            goal: {
+                                $toDouble: {
+                                    $ifNull: ["$funding_goal", 0]
+                                }
+                            }
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: null,
+                            campaignsFunded: { $sum: 1 },
+                            creditsRaised: { $sum: "$raised" },
+                            completedCampaigns: {
+                                $sum: {
+                                    $cond: [
+                                        {
+                                            $and: [
+                                                { $gt: ["$goal", 0] },
+                                                { $gte: ["$raised", "$goal"] }
+                                            ]
+                                        },
+                                        1,
+                                        0
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                ]).toArray();
+
+                const statsResult = campaignStats[0] || {
+                    campaignsFunded: 0,
+                    creditsRaised: 0,
+                    completedCampaigns: 0
+                };
+
+                const campaignsFunded = statsResult.campaignsFunded;
+                const creditsRaised = statsResult.creditsRaised;
+                const successRate = campaignsFunded > 0
+                    ? Math.round((statsResult.completedCampaigns / campaignsFunded) * 100)
+                    : 0;
+
+                res.send({
+                    success: true,
+                    data: {
+                        campaignsFunded,
+                        creditsRaised,
+                        activeSupporters,
+                        successRate
+                    }
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
         // 2. Get individual user's campaigns by userId (Pagination, Single Status Filter, Search, Deadline Descending Sort default)
         app.get('/api/campaigns/my-campaigns', verifyToken, async (req, res) => {
             try {
@@ -781,7 +900,7 @@ async function run() {
         });
 
         // 7. Payment Verification & Credit Addition
-        app.post('/api/payments/verify', verifyToken, async (req, res) => {
+        app.post('/api/payments/verify', async (req, res) => {
             try {
                 const { stripeSessionId, userEmail, creditsToAdd, amount, userId, userName, userImage } = req.body;
 
